@@ -31,9 +31,9 @@ int main(int argc, char *argv[])
 	//runTests();
 
 	// Initialize default parameters
-	std::string sceneName = "bathroom";
+	std::string sceneName = "cornell-box";
 	std::string filename = "GI.hdr";
-	unsigned int SPP = 8192;
+	unsigned int SPP = 8192; // denoising is done automatically when we reach the SPP required! Drop the SPP to a smaller number to actually see the effect. (please use box filter!)
 
 	if (argc > 1)
 	{

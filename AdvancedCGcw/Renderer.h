@@ -32,7 +32,8 @@ public:
 	Colour* albedoBuffer = nullptr;
 	Colour* normalBuffer = nullptr;
 	std::vector<VPL> vpls;
-	
+	int N = 8; // VPL number
+
 	void init(Scene* _scene, GamesEngineeringBase::Window* _canvas)
 	{
 		scene = _scene;
@@ -53,6 +54,70 @@ public:
 		film->clear();
 		memset(albedoBuffer, 0, film->width * film->height * sizeof(Colour));
     	memset(normalBuffer, 0, film->width * film->height * sizeof(Colour));
+	}
+
+	Colour vplSum(ShadingData shadingData) {
+		// this is the formula in the slides, sigma 0 -> VPLn where you do emitted colour x * emitted colour vpl * geometry term * Le
+		Colour sum(0.f, 0.f, 0.f);
+		for (auto& vpl : vpls) {
+			Vec3 wi = vpl.shadingData.x - shadingData.x;
+			float r2 = wi.lengthSq();
+			Vec3 dir = wi.normalize();
+			float cosX = Dot(dir, shadingData.sNormal);
+			float cosV = -Dot(dir, vpl.shadingData.sNormal);
+			if (scene->visible(shadingData.x, vpl.shadingData.x)) {
+				float gTerm = (cosX * cosV) / r2;
+				if (gTerm <= 0.f) continue;
+				Colour BSDFx = shadingData.bsdf->evaluate(shadingData, dir);
+				Colour BSDFv = vpl.shadingData.bsdf->evaluate(vpl.shadingData, -dir);
+				sum = sum + BSDFx * gTerm * BSDFv * vpl.Le;
+			}
+		}
+		return sum / N;
+	}
+
+	void vplTrace(Sampler* sampler) { // this is literally light trace but I added the for loop
+		vpls.clear();
+		for (int i = 0; i < N; i++) {
+			Colour emittedColour;
+			float pmf, pdfPosition, pdfDirection;
+			Light* light = scene->sampleLight(sampler, pmf);
+			if (light->isArea()) { 
+				Vec3 p = light->samplePositionFromLight(sampler, pdfPosition);
+				Vec3 wi = light->sampleDirectionFromLight(sampler, pdfDirection);
+				Colour Le = light->evaluate(-wi);
+				Colour col = Le / pdfPosition; 
+				Ray r; 
+				r.init(p + wi * EPSILON, wi); 
+				vplTracePath(r, col / pmf, Le, sampler, 0);
+			}
+	}
+	}
+
+	void vplTracePath(Ray&r, Colour pathThroughput, Colour Le, Sampler* sampler, int depth) {
+		// this is literally light trace path but I added the VPL lines
+		IntersectionData intersection = scene->traverse(r);
+		ShadingData shadingData = scene->calculateShadingData(intersection, r); 
+		if (shadingData.t == FLT_MAX) return;
+		if (shadingData.bsdf->isLight()) return; 
+		VPL vpl;
+		vpl.Le = pathThroughput;
+		vpl.shadingData = shadingData;
+		vpls.push_back(vpl);
+		if (depth > 10) return; 
+		if (depth > 3) { 
+			float rrp = std::min(pathThroughput.Lum(), 1.f);
+			if (sampler->next() > rrp) return;
+			pathThroughput = pathThroughput / rrp;
+		}
+		Colour reflectedColour;
+		float pdf; 
+		Vec3 wi2 = shadingData.bsdf->sample(shadingData, sampler, reflectedColour, pdf);
+		pathThroughput = pathThroughput * reflectedColour;
+		if (pathThroughput.Lum() > 10.f) return; 
+		Ray r2;
+		r2.init(shadingData.x + wi2 * EPSILON, wi2); 
+		vplTracePath(r2, pathThroughput, Le, sampler, depth + 1);
 	}
 
 	// connect to camera function for light tracing
@@ -86,7 +151,7 @@ public:
 			Colour col = Le / pdfPosition; // calculate col
 			Ray r; 
 			r.init(p + wi * EPSILON, wi); // will feed all this to other functions
-			connectToCamera(p, light->normal(ShadingData(), wi), col); // use col here, no normal so we just spawn one in
+			connectToCamera(p, light->normal(ShadingData(), p), col); // use col here, no normal so we just spawn one in
  			lightTracePath(r, col/pmf, Le, sampler, 0); // light trace path (where real stuff happens)
 		}
 	}
@@ -157,6 +222,7 @@ Colour pathTrace(Ray& r, Colour& pathThroughput, int depth, Sampler* sampler) {
 
 			}
 			Colour direct = pathThroughput * computeDirect(shadingData, sampler);
+			// direct = direct + vplSum(shadingData); // enable this for instant radiosity!
 			if (depth > 10) return direct;
 			Colour indirect;
 			float pdf;	
@@ -250,6 +316,7 @@ Colour pathTrace(Ray& r, Colour& pathThroughput, int depth, Sampler* sampler) {
 	{ 
 		film->incrementSPP(); // this must happen once, if it happens every thread it breaks
 		tiles.store(0); // atomic = 0
+		// vplTrace(&samplers[0]); // enable this for instant radiosity!
 		for (unsigned int i = 0; i < numProcs; i++) {
 			threads[i] = new std::thread(&RayTracer::renderTile, this, i); // spawn in threads = to num of processors
 		}
@@ -275,7 +342,7 @@ Colour pathTrace(Ray& r, Colour& pathThroughput, int depth, Sampler* sampler) {
 				albedoBuffer[y * film->width + x] = albedoBuffer[y * film->width + x] + albedo(ray); // for denoiser (feed normal + albedo info)
 				Colour throughput(1.0f, 1.0f, 1.0f);
 				Colour col = pathTrace(ray, throughput, 0, &samplers[threadID]);
-				lightTrace(&samplers[threadID]); // light tracing
+				lightTrace(&samplers[threadID]); // enable this for light tracing!
 				film->splat(px, py, col); 
 				unsigned char r = (unsigned char)(col.r * 255);
 				unsigned char g = (unsigned char)(col.g * 255);
